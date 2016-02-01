@@ -310,6 +310,11 @@ fn main() {
 	let mut content = String::new();
 	file.read_to_string(&mut content).unwrap();
 
+	//patch files that don't contain an object name
+	if !content.contains("\no") {
+		content = "o unnamed_object \n".to_owned() + &content;
+	}
+
 	let data = match wavefront_obj::obj::parse(content) {
 	    Ok(obj) => convert_obj_set(obj),
 	    Err(err) => panic!("{:?}", err),
