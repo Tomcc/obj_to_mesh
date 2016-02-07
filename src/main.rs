@@ -12,6 +12,16 @@ use std::collections::HashMap;
 use std::f64;
 use std::path::Path;
 
+fn pack_i8(val: f64) -> i8 {
+	assert!(val >= -1.0 && val <= 1.0);
+	(val * std::i8::MAX as f64).ceil() as i8
+}
+
+fn pack_i16(val: f64) -> i16 {
+	assert!(val >= -1.0 && val <= 1.0);
+	(val * std::i16::MAX as f64).ceil() as i16
+}
+
 #[derive(Clone, Copy)]
 enum Attribute {
 	Position,
@@ -22,8 +32,8 @@ enum Attribute {
 fn size_of_attribute(attr: Attribute) -> usize {
 	match attr {
 		Attribute::Position => size_of::<f32>() * 3,
-		Attribute::Normal => size_of::<f32>() * 3,
-		Attribute::Tex0 => size_of::<f32>() * 2,
+		Attribute::Normal => size_of::<i8>() * 4,
+		Attribute::Tex0 => size_of::<i16>() * 2,
 	}
 }
 
@@ -108,14 +118,15 @@ impl GPUVertex {
 		data.write_f32::<LittleEndian>(self.pos.z as f32);
 
 		if let Some(normal) = self.normal {
-			data.write_f32::<LittleEndian>(normal.x as f32);
-			data.write_f32::<LittleEndian>(normal.y as f32);
-			data.write_f32::<LittleEndian>(normal.z as f32);
+			data.write_i8(pack_i8(normal.x));
+			data.write_i8(pack_i8(normal.y));
+			data.write_i8(pack_i8(normal.z));
+			data.write_i8(0);
 		}
 
 		if let Some(tex) = self.tex {
-			data.write_f32::<LittleEndian>(tex.x as f32);
-			data.write_f32::<LittleEndian>(tex.y as f32);
+			data.write_i16::<LittleEndian>(pack_i16(tex.x));
+			data.write_i16::<LittleEndian>(pack_i16(tex.y));
 		}
 	}
 }
