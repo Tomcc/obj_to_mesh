@@ -2,7 +2,7 @@ extern crate wavefront_obj;
 extern crate byteorder;
 extern crate clap;
 
-use clap::{Arg, App, SubCommand};
+use clap::{Arg, App};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::prelude::*;
 use std::fs::File;
@@ -13,7 +13,7 @@ use std::f64;
 use std::path::Path;
 
 fn pack_i8(val: f64) -> i8 {
-	assert!(val >= -1.0 && val <= 1.0);
+	assert!(val >= -1.0 && val <= 1.0); 
 	(val * std::i8::MAX as f64).ceil() as i8
 }
 
@@ -112,21 +112,21 @@ impl GPUVertex {
 		}
 	}
 
-	fn writeTo(&self, data: &mut Vec<u8>) {
-		data.write_f32::<LittleEndian>(self.pos.x as f32);
-		data.write_f32::<LittleEndian>(self.pos.y as f32);
-		data.write_f32::<LittleEndian>(self.pos.z as f32);
+	fn write_to(&self, data: &mut Vec<u8>) {
+		data.write_f32::<LittleEndian>(self.pos.x as f32).unwrap();
+		data.write_f32::<LittleEndian>(self.pos.y as f32).unwrap();
+		data.write_f32::<LittleEndian>(self.pos.z as f32).unwrap();
 
 		if let Some(normal) = self.normal {
-			data.write_i8(pack_i8(normal.x));
-			data.write_i8(pack_i8(normal.y));
-			data.write_i8(pack_i8(normal.z));
-			data.write_i8(0);
+			data.write_i8(pack_i8(normal.x)).unwrap();
+			data.write_i8(pack_i8(normal.y)).unwrap();
+			data.write_i8(pack_i8(normal.z)).unwrap();
+			data.write_i8(0).unwrap();
 		}
 
 		if let Some(tex) = self.tex {
-			data.write_i16::<LittleEndian>(pack_i16(tex.x));
-			data.write_i16::<LittleEndian>(pack_i16(tex.y));
+			data.write_i16::<LittleEndian>(pack_i16(tex.x)).unwrap();
+			data.write_i16::<LittleEndian>(pack_i16(tex.y)).unwrap();
 		}
 	}
 }
@@ -238,29 +238,29 @@ fn convert_obj(obj: Object) -> Vec<u8> {
 	let index_size = vertex_map.get_index_size() as u8;
 	data.write_u8(index_size).unwrap();
 
-	data.write_u8(1); //always a triangle list
+	data.write_u8(1).unwrap(); //always a triangle list
 
 	//write the vertex fields
-	data.write_u8(0);   	//Position2D
-	data.write_u8(1);	//Position3D
-	data.write_u8(0);	//Color
-	data.write_u8( if vertex_map.format.normal.is_some() { 1 } else { 0 } );
-	data.write_u8( if vertex_map.format.tex0.is_some() { 1 } else { 0 } );
-	data.write_u8(0);	//Tex1
+	data.write_u8(0).unwrap();   	//Position2D
+	data.write_u8(1).unwrap();	//Position3D
+	data.write_u8(0).unwrap();	//Color
+	data.write_u8( if vertex_map.format.normal.is_some() { 1 } else { 0 } ).unwrap();
+	data.write_u8( if vertex_map.format.tex0.is_some() { 1 } else { 0 } ).unwrap();
+	data.write_u8(0).unwrap();	//Tex1
 
-	data.write_f32::<LittleEndian>(vertex_map.max.x as f32);
-	data.write_f32::<LittleEndian>(vertex_map.max.y as f32);
-	data.write_f32::<LittleEndian>(vertex_map.max.z as f32);
+	data.write_f32::<LittleEndian>(vertex_map.max.x as f32).unwrap();
+	data.write_f32::<LittleEndian>(vertex_map.max.y as f32).unwrap();
+	data.write_f32::<LittleEndian>(vertex_map.max.z as f32).unwrap();
 
-	data.write_f32::<LittleEndian>(vertex_map.min.x as f32);
-	data.write_f32::<LittleEndian>(vertex_map.min.y as f32);
-	data.write_f32::<LittleEndian>(vertex_map.min.z as f32);
+	data.write_f32::<LittleEndian>(vertex_map.min.x as f32).unwrap();
+	data.write_f32::<LittleEndian>(vertex_map.min.y as f32).unwrap();
+	data.write_f32::<LittleEndian>(vertex_map.min.z as f32).unwrap();
 
-	data.write_u32::<LittleEndian>(vertex_map.vertices.len() as u32);
-	data.write_u32::<LittleEndian>(vertex_map.indices.len() as u32);
+	data.write_u32::<LittleEndian>(vertex_map.vertices.len() as u32).unwrap();
+	data.write_u32::<LittleEndian>(vertex_map.indices.len() as u32).unwrap();
 
 	for v in vertex_map.vertices {
-		v.writeTo(&mut data);
+		v.write_to(&mut data);
 	}
 
 	for idx in vertex_map.indices {
@@ -333,7 +333,7 @@ fn main() {
 
 	let mut file = File::create(output).unwrap();
 
-	file.write_all(&data[0]);
+	file.write_all(&data[0]).unwrap();
 
 	println!("Done!");
 }
