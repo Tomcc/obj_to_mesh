@@ -7,21 +7,33 @@ use clap::{Arg, App};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::prelude::*;
 use std::fs::File;
-use wavefront_obj::obj::{ObjSet, Object, Shape, VTNIndex, Vertex, TVertex};
+use wavefront_obj::obj::{ObjSet, Object, Shape, VTNIndex, Vertex, TVertex, Normal};
 use std::mem::size_of;
 use std::collections::HashMap;
 use std::f64;
 use std::path::Path;
 use half::f16;
 
-fn pack_i8(val: f64) -> i8 {
-	assert!(val >= -1.0 && val <= 1.0); 
-	(val * std::i8::MAX as f64).ceil() as i8
+fn pack_normalized(val: f64, max: u32) -> u32 {
+	f64::ceil(val * max as f64) as u32
+}
+
+fn pack_i2_10_10_10(normal: Normal) -> u32 {
+	(pack_normalized(normal.x, 511) << 0) |
+	(pack_normalized(normal.y, 511) << 10) |
+	(pack_normalized(normal.z, 511) << 20)
 }
 
 fn pack_f16(val: f64) -> u16 {
-	assert!(val >= -1.0 && val <= 1.0);
-	f16::from_f64(val).as_bits()
+	//attempt to fix bad exports
+	let mut x = val;
+	while x > 1. {
+		x -= 1.;
+	}
+	while x < -1. {
+		x += 1.;
+	}
+	f16::from_f64(x).as_bits()
 }
 
 #[derive(Clone, Copy)]
@@ -120,10 +132,7 @@ impl GPUVertex {
 		data.write_f32::<LittleEndian>(self.pos.z as f32).unwrap();
 
 		if let Some(normal) = self.normal {
-			data.write_i8(pack_i8(normal.x)).unwrap();
-			data.write_i8(pack_i8(normal.y)).unwrap();
-			data.write_i8(pack_i8(normal.z)).unwrap();
-			data.write_i8(0).unwrap();
+			data.write_u32::<LittleEndian>(pack_i2_10_10_10(normal)).unwrap();
 		}
 
 		if let Some(tex) = self.tex {
