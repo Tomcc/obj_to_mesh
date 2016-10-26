@@ -1,6 +1,7 @@
 extern crate wavefront_obj;
 extern crate byteorder;
 extern crate clap;
+extern crate half;
 
 use clap::{Arg, App};
 use byteorder::{LittleEndian, WriteBytesExt};
@@ -11,15 +12,16 @@ use std::mem::size_of;
 use std::collections::HashMap;
 use std::f64;
 use std::path::Path;
+use half::f16;
 
 fn pack_i8(val: f64) -> i8 {
 	assert!(val >= -1.0 && val <= 1.0); 
 	(val * std::i8::MAX as f64).ceil() as i8
 }
 
-fn pack_i16(val: f64) -> i16 {
+fn pack_f16(val: f64) -> u16 {
 	assert!(val >= -1.0 && val <= 1.0);
-	(val * std::i16::MAX as f64).ceil() as i16
+	f16::from_f64(val).as_bits()
 }
 
 #[derive(Clone, Copy)]
@@ -33,7 +35,7 @@ fn size_of_attribute(attr: Attribute) -> usize {
 	match attr {
 		Attribute::Position => size_of::<f32>() * 3,
 		Attribute::Normal => size_of::<i8>() * 4,
-		Attribute::Tex0 => size_of::<i16>() * 2,
+		Attribute::Tex0 => size_of::<f16>() * 2,
 	}
 }
 
@@ -125,8 +127,8 @@ impl GPUVertex {
 		}
 
 		if let Some(tex) = self.tex {
-			data.write_i16::<LittleEndian>(pack_i16(tex.x)).unwrap();
-			data.write_i16::<LittleEndian>(pack_i16(tex.y)).unwrap();
+			data.write_u16::<LittleEndian>(pack_f16(tex.x)).unwrap();
+			data.write_u16::<LittleEndian>(pack_f16(tex.y)).unwrap();
 		}
 	}
 }
@@ -241,7 +243,7 @@ fn convert_obj(obj: Object) -> Vec<u8> {
 	data.write_u8(1).unwrap(); //always a triangle list
 
 	//write the vertex fields
-	data.write_u8(0).unwrap();   	//Position2D
+	data.write_u8(0).unwrap();  //Position2D
 	data.write_u8(1).unwrap();	//Position3D
 	data.write_u8(0).unwrap();	//Color
 	data.write_u8( if vertex_map.format.normal.is_some() { 1 } else { 0 } ).unwrap();

@@ -7,3 +7,4 @@ authors = ["Tommaso Checchi <tommaso.checchi1@gmail.com>"]
 byteorder = "0.4.2"
 clap = "2.0.2"
 wavefront_obj = "^3.0.0"
+half = "0.1.0"
