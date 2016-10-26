@@ -255,8 +255,9 @@ fn convert_obj(obj: Object) -> Vec<u8> {
 	data.write_u8(0).unwrap();  //Position2D
 	data.write_u8(1).unwrap();	//Position3D
 	data.write_u8(0).unwrap();	//Color
-	data.write_u8( if vertex_map.format.normal.is_some() { 1 } else { 0 } ).unwrap();
-	data.write_u8( if vertex_map.format.tex0.is_some() { 1 } else { 0 } ).unwrap();
+	data.write_u8( if vertex_map.format.normal.is_some() { 1 } else { 0 } ).unwrap(); //Normal
+	data.write_u8(0).unwrap();	//Tangent
+	data.write_u8( if vertex_map.format.tex0.is_some() { 1 } else { 0 } ).unwrap();  //Tex0
 	data.write_u8(0).unwrap();	//Tex1
 
 	data.write_f32::<LittleEndian>(vertex_map.max.x as f32).unwrap();
