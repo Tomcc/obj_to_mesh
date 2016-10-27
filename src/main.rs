@@ -10,7 +10,6 @@ use std::fs::File;
 use wavefront_obj::obj::{ObjSet, Object, Shape, VTNIndex, Vertex, TVertex, Normal};
 use std::mem::size_of;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::f64;
 use std::path::Path;
 use half::f16;
@@ -123,8 +122,6 @@ struct GPUVertex {
 	normal: Option<Vertex>,
 	tangent: Option<Vertex>,
 	tex: Option<TVertex>,
-
-	connected_to: HashSet<usize>,
 }
 
 impl GPUVertex {
@@ -141,7 +138,6 @@ impl GPUVertex {
 			    Some(idx) if format.tex0.is_some() => Some(obj.tex_vertices[idx]),
 			    _ => None,
 			},
-			connected_to: HashSet::new(),
 		}
 	}
 
@@ -200,14 +196,37 @@ fn vert_max(a: Vertex, b: Vertex) -> Vertex {
 	}
 } 
 
-fn generate_tangent(v1: Vertex, v2: Vertex, st1: TVertex, st2: TVertex) -> Vertex {
-		let coef = 1. / (st1.x * st2.y - st2.x * st1.y);
-		
-		Vertex{
-			x: coef * ((v1.x * st2.y)  + (v2.x * -st1.y)),
-			y: coef * ((v1.y * st2.y)  + (v2.y * -st1.y)),
-			z: coef * ((v1.z * st2.y)  + (v2.z * -st1.y)),
-		}
+fn addmut(dst: &mut Vertex, src: Vertex) {
+	dst.x += src.x;
+	dst.y += src.y;
+	dst.z += src.z;
+}
+
+fn lenght(v: Vertex) -> f64 {
+	f64::sqrt( v.x * v.x + v.y * v.y + v.z * v.z )
+}
+fn normalize(v: Vertex) -> Vertex {
+	mul(v, 1.0 / lenght(v))
+}
+
+fn dot(a: Vertex, b: Vertex) -> f64 {
+	a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn sub(a: Vertex, b: Vertex) -> Vertex {
+	Vertex{
+		x: a.x - b.x,
+		y: a.y - b.y,
+		z: a.z - b.z,
+	}
+}
+
+fn mul(a: Vertex, b: f64) -> Vertex {
+	Vertex{
+		x: a.x * b,
+		y: a.y * b,
+		z: a.z * b,
+	}
 }
 
 impl Mesh {
@@ -226,18 +245,9 @@ impl Mesh {
 			for shape in &geo.shapes {
 				match *shape {
 					Shape::Triangle(v1, v2, v3) => {
-						let i1 = mesh.add_index(v1, &obj, &format);
-						let i2 = mesh.add_index(v2, &obj, &format);
-						let i3 = mesh.add_index(v3, &obj, &format);
-
-						if generate_tangents {
-							mesh.vertices[i1].connected_to.insert(i2);
-							mesh.vertices[i1].connected_to.insert(i3);
-							mesh.vertices[i2].connected_to.insert(i1);
-							mesh.vertices[i2].connected_to.insert(i3);
-							mesh.vertices[i3].connected_to.insert(i1);
-							mesh.vertices[i3].connected_to.insert(i2);
-						}
+						mesh.add_index(v1, &obj, &format);
+						mesh.add_index(v2, &obj, &format);
+						mesh.add_index(v3, &obj, &format);
 					},
 					_=> panic!("Unsupported primitive mode")
 				}
@@ -245,36 +255,56 @@ impl Mesh {
 		}
 
 		if generate_tangents {
-			for i in 0..mesh.vertices.len() {
-			
-				let mut tangent = Vertex{x: 0.0, y: 0.0, z: 0.0};
-				{
-					//this code is incredibly awkward, summing the tangent and 
-					//taking references to the vertices seems not possible?
-					let v1 = &mesh.vertices[i];
-					for j in &v1.connected_to {
-						let v2 = &mesh.vertices[*j];
-						let t = generate_tangent(
-							v1.pos,
-							v2.pos,
-							v1.tex.unwrap(),
-							v2.tex.unwrap()
-						);
+			//http://gamedev.stackexchange.com/questions/68612/how-to-compute-tangent-and-bitangent-vectors
 
-						tangent.x += t.x;
-						tangent.y += t.y;
-						tangent.z += t.z;
-					}
+			let mut tan1 = vec!(Vertex{x: 0.0, y: 0.0, z:0.0}; mesh.vertices.len());
 
-					//average
-					let len = v1.connected_to.len() as f64;
-					tangent.x /= len;
-					tangent.y /= len;
-					tangent.z /= len;
-				}
+			let mut ii = 0;
+			while ii < mesh.indices.len() {
+				let i1 = mesh.indices[ii + 0];
+				let i2 = mesh.indices[ii + 1];
+				let i3 = mesh.indices[ii + 2];
 
-				//write on the vertex
-				mesh.vertices[i].tangent = Some(tangent);
+				let v1 = mesh.vertices[i1].pos;
+				let v2 = mesh.vertices[i2].pos;
+				let v3 = mesh.vertices[i3].pos;
+
+				let w1 = mesh.vertices[i1].tex.unwrap();
+				let w2 = mesh.vertices[i2].tex.unwrap();
+				let w3 = mesh.vertices[i3].tex.unwrap();
+
+				let x1 = v2.x - v1.x;
+				let x2 = v3.x - v1.x;
+				let y1 = v2.y - v1.y;
+				let y2 = v3.y - v1.y;
+				let z1 = v2.z - v1.z;
+				let z2 = v3.z - v1.z;
+
+				let s1 = w2.x - w1.x;
+				let s2 = w3.x - w1.x;
+				let t1 = w2.y - w1.y;
+				let t2 = w3.y - w1.y;
+
+				let r = 1.0 / (s1 * t2 - s2 * t1);
+				let sdir = Vertex{
+					x: (t2 * x1 - t1 * x2) * r, 
+					y: (t2 * y1 - t1 * y2) * r,
+					z: (t2 * z1 - t1 * z2) * r,
+				};
+				
+				addmut(&mut tan1[i1], sdir);
+				addmut(&mut tan1[i2], sdir);
+				addmut(&mut tan1[i3], sdir);
+				
+				ii += 3;
+			}
+
+			for a in 0..mesh.vertices.len()	{
+				let n = mesh.vertices[a].normal.unwrap();
+				let t = tan1[a];
+
+				// Gram-Schmidt orthogonalize
+				mesh.vertices[a].tangent = Some(normalize(sub(t,mul(n, dot(n, t)))));
 			}
 		}
 
@@ -294,17 +324,15 @@ impl Mesh {
 		idx
 	}
 
-	fn add_index(&mut self, vtni: VTNIndex, obj: &Object, format: &VertexFieldOffsets) -> usize {
+	fn add_index(&mut self, vtni: VTNIndex, obj: &Object, format: &VertexFieldOffsets) {
 		if let Some(idx) = self.map.get(&vtni) {
 			self.indices.push(*idx);
-			return *idx;
+			return;
 		}
 
 		let idx = self.create_vertex(vtni, obj, format);
 		self.map.insert(vtni, idx);
 		self.indices.push(idx);
-
-		idx
 	}
 
 	fn get_index_size(&self) -> usize {
