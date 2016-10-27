@@ -18,10 +18,11 @@ fn pack_normalized(val: f64, max: u32) -> u32 {
 	f64::ceil(val * max as f64) as u32
 }
 
-fn pack_i2_10_10_10(normal: Normal) -> u32 {
+fn pack_i2_10_10_10(normal: Normal, w: f64) -> u32 {
 	(pack_normalized(normal.x, 511) << 0) |
 	(pack_normalized(normal.y, 511) << 10) |
-	(pack_normalized(normal.z, 511) << 20)
+	(pack_normalized(normal.z, 511) << 20) |
+	(pack_normalized(w, 1)) << 30
 }
 
 fn pack_f16(val: f64) -> u16 {
@@ -119,8 +120,9 @@ impl VertexFieldOffsets {
 #[derive(Clone, Debug)]
 struct GPUVertex {
 	pos: Vertex,
-	normal: Option<Vertex>,
-	tangent: Option<Vertex>,
+	normal: Option<Normal>,
+	tangent: Option<Normal>,
+	tangent_handedness: f64,
 	tex: Option<TVertex>,
 }
 
@@ -134,6 +136,7 @@ impl GPUVertex {
 			    _ => None,
 			},
 			tangent: None,
+			tangent_handedness: 0.0,
 			tex: match tex_opt_idx {
 			    Some(idx) if format.tex0.is_some() => Some(obj.tex_vertices[idx]),
 			    _ => None,
@@ -147,11 +150,11 @@ impl GPUVertex {
 		data.write_f32::<LittleEndian>(self.pos.z as f32).unwrap();
 
 		if let Some(normal) = self.normal {
-			data.write_u32::<LittleEndian>(pack_i2_10_10_10(normal)).unwrap();
+			data.write_u32::<LittleEndian>(pack_i2_10_10_10(normal, 0.0)).unwrap();
 		}
 
 		if let Some(tangent) = self.tangent {
-			data.write_u32::<LittleEndian>(pack_i2_10_10_10(tangent)).unwrap();
+			data.write_u32::<LittleEndian>(pack_i2_10_10_10(tangent, self.tangent_handedness)).unwrap();
 		}
 
 		if let Some(tex) = self.tex {
@@ -213,6 +216,14 @@ fn dot(a: Vertex, b: Vertex) -> f64 {
 	a.x * b.x + a.y * b.y + a.z * b.z
 }
 
+fn cross(a: Vertex, b: Vertex) -> Vertex {
+	Vertex{
+		x: a.y*b.z - a.z*b.y,
+		y: a.z*b.x - a.x*b.z,
+		z: a.x*b.y - a.y*b.x
+	}
+}
+
 fn sub(a: Vertex, b: Vertex) -> Vertex {
 	Vertex{
 		x: a.x - b.x,
@@ -258,6 +269,7 @@ impl Mesh {
 			//http://gamedev.stackexchange.com/questions/68612/how-to-compute-tangent-and-bitangent-vectors
 
 			let mut tan1 = vec!(Vertex{x: 0.0, y: 0.0, z:0.0}; mesh.vertices.len());
+			let mut tan2 = vec!(Vertex{x: 0.0, y: 0.0, z:0.0}; mesh.vertices.len());
 
 			let mut ii = 0;
 			while ii < mesh.indices.len() {
@@ -295,7 +307,17 @@ impl Mesh {
 				addmut(&mut tan1[i1], sdir);
 				addmut(&mut tan1[i2], sdir);
 				addmut(&mut tan1[i3], sdir);
-				
+
+				let tdir = Vertex{
+					x: (s1 * x2 - s2 * x1) * r,
+					y: (s1 * y2 - s2 * y1) * r,
+                	z: (s1 * z2 - s2 * z1) * r,
+				};
+
+				addmut(&mut tan2[i1], tdir);
+				addmut(&mut tan2[i2], tdir);
+				addmut(&mut tan2[i3], tdir);
+
 				ii += 3;
 			}
 
@@ -305,6 +327,14 @@ impl Mesh {
 
 				// Gram-Schmidt orthogonalize
 				mesh.vertices[a].tangent = Some(normalize(sub(t,mul(n, dot(n, t)))));
+				
+				// Calculate handedness
+				mesh.vertices[a].tangent_handedness = if dot(cross(n, t), tan2[a]) < 0.0 {
+					-1.0
+				}
+				else {
+					1.0
+				}
 			}
 		}
 
