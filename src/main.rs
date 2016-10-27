@@ -10,6 +10,7 @@ use std::fs::File;
 use wavefront_obj::obj::{ObjSet, Object, Shape, VTNIndex, Vertex, TVertex, Normal};
 use std::mem::size_of;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::f64;
 use std::path::Path;
 use half::f16;
@@ -40,13 +41,15 @@ fn pack_f16(val: f64) -> u16 {
 enum Attribute {
 	Position,
 	Normal,
+	Tangent,
 	Tex0,
 }
 
 fn size_of_attribute(attr: Attribute) -> usize {
 	match attr {
 		Attribute::Position => size_of::<f32>() * 3,
-		Attribute::Normal => size_of::<i8>() * 4,
+		Attribute::Normal => size_of::<u32>(),
+		Attribute::Tangent => size_of::<u32>(),
 		Attribute::Tex0 => size_of::<f16>() * 2,
 	}
 }
@@ -54,6 +57,7 @@ fn size_of_attribute(attr: Attribute) -> usize {
 #[derive(Debug, Clone, Copy)]
 struct VertexFieldOffsets {
 	normal: Option<usize>,
+	tangent: Option<usize>,
 	tex0: Option<usize>,
 }
 
@@ -62,7 +66,8 @@ fn has_attribute(vtni: VTNIndex, attr: Attribute) -> bool {
 	match attr {
 		Attribute::Position => true,
 		Attribute::Normal => normal.is_some(),
-		Attribute::Tex0 => tex.is_some()
+		Attribute::Tex0 => tex.is_some(),
+		_ => false,
 	}
 }
 
@@ -93,21 +98,33 @@ fn get_offset(obj: &Object, attr: Attribute, offset: &mut usize) -> Option<usize
 }
 
 impl VertexFieldOffsets {
-	fn from_object(obj: &Object) -> Self {
+	fn from_object(obj: &Object, with_tangent: bool) -> Self {
 		let mut offset = size_of_attribute(Attribute::Position);
 
 		VertexFieldOffsets {
 			normal: get_offset(obj, Attribute::Normal, &mut offset),
+			tangent: 
+				if with_tangent {
+					let orig_offset = offset;
+					offset += size_of_attribute(Attribute::Tangent);
+					Some(orig_offset)
+				}
+				else {
+					None
+				},
 			tex0: get_offset(obj, Attribute::Tex0, &mut offset),
 		}
 	}
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct GPUVertex {
 	pos: Vertex,
 	normal: Option<Vertex>,
+	tangent: Option<Vertex>,
 	tex: Option<TVertex>,
+
+	connected_to: HashSet<usize>,
 }
 
 impl GPUVertex {
@@ -119,10 +136,12 @@ impl GPUVertex {
 			    Some(idx) if format.normal.is_some() => Some(obj.normals[idx]),
 			    _ => None,
 			},
+			tangent: None,
 			tex: match tex_opt_idx {
 			    Some(idx) if format.tex0.is_some() => Some(obj.tex_vertices[idx]),
 			    _ => None,
 			},
+			connected_to: HashSet::new(),
 		}
 	}
 
@@ -133,6 +152,10 @@ impl GPUVertex {
 
 		if let Some(normal) = self.normal {
 			data.write_u32::<LittleEndian>(pack_i2_10_10_10(normal)).unwrap();
+		}
+
+		if let Some(tangent) = self.tangent {
+			data.write_u32::<LittleEndian>(pack_i2_10_10_10(tangent)).unwrap();
 		}
 
 		if let Some(tex) = self.tex {
@@ -177,10 +200,20 @@ fn vert_max(a: Vertex, b: Vertex) -> Vertex {
 	}
 } 
 
+fn generate_tangent(v1: Vertex, v2: Vertex, st1: TVertex, st2: TVertex) -> Vertex {
+		let coef = 1. / (st1.x * st2.y - st2.x * st1.y);
+		
+		Vertex{
+			x: coef * ((v1.x * st2.y)  + (v2.x * -st1.y)),
+			y: coef * ((v1.y * st2.y)  + (v2.y * -st1.y)),
+			z: coef * ((v1.z * st2.y)  + (v2.z * -st1.y)),
+		}
+}
+
 impl Mesh {
-	fn from_object(obj: &Object) -> Self {
-		let format = VertexFieldOffsets::from_object(&obj);
-		let mut vertex_map = Mesh {
+	fn from_object(obj: &Object, generate_tangents: bool) -> Self {
+		let format = VertexFieldOffsets::from_object(&obj, generate_tangents);
+		let mut mesh = Mesh {
 			vertices: Vec::new(),
 			indices: Vec::new(),
 			map:HashMap::new(),
@@ -193,16 +226,59 @@ impl Mesh {
 			for shape in &geo.shapes {
 				match *shape {
 					Shape::Triangle(v1, v2, v3) => {
-						vertex_map.add(v1, &obj, &format);
-						vertex_map.add(v2, &obj, &format);
-						vertex_map.add(v3, &obj, &format);
+						let i1 = mesh.add_index(v1, &obj, &format);
+						let i2 = mesh.add_index(v2, &obj, &format);
+						let i3 = mesh.add_index(v3, &obj, &format);
+
+						if generate_tangents {
+							mesh.vertices[i1].connected_to.insert(i2);
+							mesh.vertices[i1].connected_to.insert(i3);
+							mesh.vertices[i2].connected_to.insert(i1);
+							mesh.vertices[i2].connected_to.insert(i3);
+							mesh.vertices[i3].connected_to.insert(i1);
+							mesh.vertices[i3].connected_to.insert(i2);
+						}
 					},
 					_=> panic!("Unsupported primitive mode")
 				}
 			}
 		}
 
-		vertex_map
+		if generate_tangents {
+			for i in 0..mesh.vertices.len() {
+			
+				let mut tangent = Vertex{x: 0.0, y: 0.0, z: 0.0};
+				{
+					//this code is incredibly awkward, summing the tangent and 
+					//taking references to the vertices seems not possible?
+					let v1 = &mesh.vertices[i];
+					for j in &v1.connected_to {
+						let v2 = &mesh.vertices[*j];
+						let t = generate_tangent(
+							v1.pos,
+							v2.pos,
+							v1.tex.unwrap(),
+							v2.tex.unwrap()
+						);
+
+						tangent.x += t.x;
+						tangent.y += t.y;
+						tangent.z += t.z;
+					}
+
+					//average
+					let len = v1.connected_to.len() as f64;
+					tangent.x /= len;
+					tangent.y /= len;
+					tangent.z /= len;
+				}
+
+				//write on the vertex
+				mesh.vertices[i].tangent = Some(tangent);
+			}
+		}
+
+		mesh
 	}	
 
 	fn create_vertex(&mut self, vtni: VTNIndex, obj: &Object, format: &VertexFieldOffsets) -> usize {
@@ -210,23 +286,25 @@ impl Mesh {
 
 		let v = GPUVertex::from_vtni_and_obj(vtni, obj, format);
 
-		self.vertices.push( v );
-
 		self.min = vert_min(self.min, v.pos);
 		self.max = vert_max(self.max, v.pos);
+
+		self.vertices.push( v );
 
 		idx
 	}
 
-	fn add(&mut self, vtni: VTNIndex, obj: &Object, format: &VertexFieldOffsets) {
+	fn add_index(&mut self, vtni: VTNIndex, obj: &Object, format: &VertexFieldOffsets) -> usize {
 		if let Some(idx) = self.map.get(&vtni) {
 			self.indices.push(*idx);
-			return;
+			return *idx;
 		}
 
 		let idx = self.create_vertex(vtni, obj, format);
 		self.map.insert(vtni, idx);
 		self.indices.push(idx);
+
+		idx
 	}
 
 	fn get_index_size(&self) -> usize {
@@ -238,15 +316,15 @@ impl Mesh {
 	}
 }
 
-fn convert_obj(obj: Object) -> Vec<u8> {
+fn convert_obj(obj: Object, generate_tangents: bool) -> Vec<u8> {
 
 	//build a VTNIndex => Vertex map and build actual vertices
-	let vertex_map = Mesh::from_object(&obj);
+	let mesh = Mesh::from_object(&obj, generate_tangents);
 
 	let mut data = vec![];
 
 	//write the index size in bytes
-	let index_size = vertex_map.get_index_size() as u8;
+	let index_size = mesh.get_index_size() as u8;
 	data.write_u8(index_size).unwrap();
 
 	data.write_u8(1).unwrap(); //always a triangle list
@@ -255,27 +333,27 @@ fn convert_obj(obj: Object) -> Vec<u8> {
 	data.write_u8(0).unwrap();  //Position2D
 	data.write_u8(1).unwrap();	//Position3D
 	data.write_u8(0).unwrap();	//Color
-	data.write_u8( if vertex_map.format.normal.is_some() { 1 } else { 0 } ).unwrap(); //Normal
-	data.write_u8(0).unwrap();	//Tangent
-	data.write_u8( if vertex_map.format.tex0.is_some() { 1 } else { 0 } ).unwrap();  //Tex0
+	data.write_u8( if mesh.format.normal.is_some() { 1 } else { 0 } ).unwrap(); //Normal
+	data.write_u8( if mesh.format.tangent.is_some() { 1 } else { 0 } ).unwrap();	//Tangent
+	data.write_u8( if mesh.format.tex0.is_some() { 1 } else { 0 } ).unwrap();  //Tex0
 	data.write_u8(0).unwrap();	//Tex1
 
-	data.write_f32::<LittleEndian>(vertex_map.max.x as f32).unwrap();
-	data.write_f32::<LittleEndian>(vertex_map.max.y as f32).unwrap();
-	data.write_f32::<LittleEndian>(vertex_map.max.z as f32).unwrap();
+	data.write_f32::<LittleEndian>(mesh.max.x as f32).unwrap();
+	data.write_f32::<LittleEndian>(mesh.max.y as f32).unwrap();
+	data.write_f32::<LittleEndian>(mesh.max.z as f32).unwrap();
 
-	data.write_f32::<LittleEndian>(vertex_map.min.x as f32).unwrap();
-	data.write_f32::<LittleEndian>(vertex_map.min.y as f32).unwrap();
-	data.write_f32::<LittleEndian>(vertex_map.min.z as f32).unwrap();
+	data.write_f32::<LittleEndian>(mesh.min.x as f32).unwrap();
+	data.write_f32::<LittleEndian>(mesh.min.y as f32).unwrap();
+	data.write_f32::<LittleEndian>(mesh.min.z as f32).unwrap();
 
-	data.write_u32::<LittleEndian>(vertex_map.vertices.len() as u32).unwrap();
-	data.write_u32::<LittleEndian>(vertex_map.indices.len() as u32).unwrap();
+	data.write_u32::<LittleEndian>(mesh.vertices.len() as u32).unwrap();
+	data.write_u32::<LittleEndian>(mesh.indices.len() as u32).unwrap();
 
-	for v in vertex_map.vertices {
+	for v in mesh.vertices {
 		v.write_to(&mut data);
 	}
 
-	for idx in vertex_map.indices {
+	for idx in mesh.indices {
 		match index_size {
 			1 => data.write_u8(idx as u8).unwrap(),
 			2 => data.write_u16::<LittleEndian>(idx as u16).unwrap(),
@@ -287,11 +365,11 @@ fn convert_obj(obj: Object) -> Vec<u8> {
 	data
 }
 
-fn convert_obj_set(set: ObjSet) -> Vec<Vec<u8>> {
+fn convert_obj_set(set: ObjSet, generate_tangents: bool) -> Vec<Vec<u8>> {
 	let mut data: Vec<Vec<u8>> = vec![];
 
 	for obj in set.objects {
-		data.push(convert_obj(obj));
+		data.push(convert_obj(obj, generate_tangents));
 	}
 
 	data
@@ -312,6 +390,10 @@ fn main() {
 			.takes_value(true)
 			.value_name("MESH_FILE")
 			.help("Sets the output file. Defaults to OBJ_FILE.mesh"))
+		.arg(Arg::with_name("gen_tangents")
+			.long("gen_tangents")
+			.short("t")
+			.help("Generates the tangents using UVs"))
 		.get_matches();
 
 	let input = Path::new(matches.value_of("input").unwrap());
@@ -338,8 +420,10 @@ fn main() {
 		content = "o unnamed_object \n".to_owned() + &content;
 	}
 
+	let generate_tangents = matches.occurrences_of("gen_tangents") > 0;
+
 	let data = match wavefront_obj::obj::parse(content) {
-	    Ok(obj) => convert_obj_set(obj),
+	    Ok(obj) => convert_obj_set(obj, generate_tangents),
 	    Err(err) => panic!("{:?}", err),
 	};
 
